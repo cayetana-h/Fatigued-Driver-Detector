@@ -21,7 +21,7 @@ COOLDOWN     = 2.0
 MODEL_PATH   = "models/hand_landmarker.task"
 
 
-# internal state machine for tracking the progress of the sequence
+# tracking progress of the sequence
 class _S(Enum):
     IDLE       = auto()
     COLLECTING = auto()
@@ -51,7 +51,7 @@ class GestureGate:
 
     @property
     def step(self) -> int:
-        """returns the current step in the sequence (0-based index), or the length of the sequence if completed"""
+        """returns the current step in the sequence or the length of the sequence if completed"""
         return self._step
 
     @property
@@ -117,7 +117,7 @@ class GestureGate:
 
         if gesture == target:
             self._hold_count = self._hold_count + 1 if gesture == self._last_gesture else 1
-            self._last_gesture = gesture # update last gesture even if it's the same, to reset hold count if it changes
+            self._last_gesture = gesture # update last gesture to reset hold count if it changes
 
             if self._hold_count >= HOLD_FRAMES:
                 if self._state == _S.IDLE:
@@ -131,11 +131,11 @@ class GestureGate:
 
                 if self._step == len(SEQUENCE):
                     self._state = _S.DONE
-                    return True # just activated
+                    return True 
         else:
             if gesture != self._last_gesture:
                 self._hold_count = 0
             self._last_gesture = gesture
 
-        return False # not activated yet
+        return False 
     
