@@ -86,6 +86,12 @@ class GestureGate:
                                  for p in result.hand_landmarks[0]], dtype=np.float32)
             gesture = classify_from_landmarks(pts)
 
+        return self.process_gesture(gesture, now)
+
+    def process_gesture(self, gesture: Optional[str], now: Optional[float] = None) -> bool:
+        """Process a gesture directly, for tests and logic reuse."""
+        if now is None:
+            now = time.monotonic()
         return self._advance(gesture, now)
 
     def close(self):
