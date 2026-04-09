@@ -1,66 +1,72 @@
-import cv2
 import numpy as np
-import sys
-from pathlib import Path
-import mediapipe as mp
-from mediapipe.tasks import python as mp_python
-from mediapipe.tasks.python import vision as mp_vision
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.gestures.classifier import classify_from_landmarks
 
-MODEL_PATH = "models/hand_landmarker.task" 
 
-# hand landmarker setup
-base_options = mp_python.BaseOptions(model_asset_path=MODEL_PATH)
-options = mp_vision.HandLandmarkerOptions(
-    base_options=base_options,
-    running_mode=mp_vision.RunningMode.VIDEO,
-    num_hands=1,
-    min_hand_detection_confidence=0.5,
-    min_hand_presence_confidence=0.5,
-    min_tracking_confidence=0.5,
-)
-# the hand landmarker detects hand landmarks in the video feed (21 points per hand) and returns their normalized positions
-landmarker = mp_vision.HandLandmarker.create_from_options(options)
+def _make_hand(
+    thumb_tip_x: float,
+    index_tip_y: float,
+    middle_tip_y: float,
+    ring_tip_y: float,
+    pinky_tip_y: float,
+) -> np.ndarray:
+    pts = np.zeros((21, 3), dtype=np.float32)
 
-cap = cv2.VideoCapture(0)
-print("Show gestures in front of the camera. Q to quit.")
-frame_idx = 0
+    # Wrist
+    pts[0] = [0.5, 0.9, 0.0]
 
-while True:
-    ok, frame = cap.read()
-    if not ok:
-        continue
+    # Thumb
+    pts[2] = [0.42, 0.65, 0.0]
+    pts[3] = [0.35, 0.55, 0.0]
+    pts[4] = [thumb_tip_x, 0.45, 0.0]
 
-    rgb        = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    mp_image   = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-    timestamp_ms = int(frame_idx * (1000 / 30))   
-    frame_idx += 1
+    # Index
+    pts[6] = [0.45, 0.60, 0.0]
+    pts[8] = [0.45, index_tip_y, 0.0]
 
-    result  = landmarker.detect_for_video(mp_image, timestamp_ms)
-    gesture = None
+    # Middle
+    pts[10] = [0.50, 0.62, 0.0]
+    pts[12] = [0.50, middle_tip_y, 0.0]
 
-    # if a hand is detected, we get the normalized positions of the landmarks and classify the gesture
-    if result.hand_landmarks:
-        lm  = result.hand_landmarks[0]   
-        pts = np.array([[p.x, p.y, p.z] for p in lm], dtype=np.float32)
-        gesture = classify_from_landmarks(pts)
+    # Ring
+    pts[14] = [0.55, 0.66, 0.0]
+    pts[16] = [0.55, ring_tip_y, 0.0]
 
-        h, w = frame.shape[:2]
-        for p in lm:
-            cx, cy = int(p.x * w), int(p.y * h)
-            cv2.circle(frame, (cx, cy), 3, (80, 200, 80), -1)
+    # Pinky
+    pts[18] = [0.60, 0.70, 0.0]
+    pts[20] = [0.60, pinky_tip_y, 0.0]
 
-    label = gesture or "---"
-    color = (80, 200, 80) if gesture else (160, 160, 160)
-    cv2.putText(frame, label, (20, 50),
-                cv2.FONT_HERSHEY_SIMPLEX, 1.4, color, 2)
+    return pts
 
-    cv2.imshow("Gesture test", frame)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
 
-cap.release()
-cv2.destroyAllWindows()
-landmarker.close()
+def test_classifies_open_palm():
+    pts = _make_hand(
+        thumb_tip_x=0.22,
+        index_tip_y=0.28,
+        middle_tip_y=0.24,
+        ring_tip_y=0.30,
+        pinky_tip_y=0.34,
+    )
+    assert classify_from_landmarks(pts) == "open_palm"
+
+
+def test_classifies_peace():
+    pts = _make_hand(
+        thumb_tip_x=0.40,
+        index_tip_y=0.28,
+        middle_tip_y=0.24,
+        ring_tip_y=0.80,
+        pinky_tip_y=0.82,
+    )
+    assert classify_from_landmarks(pts) == "peace"
+
+
+def test_classifies_fist():
+    pts = _make_hand(
+        thumb_tip_x=0.44,
+        index_tip_y=0.82,
+        middle_tip_y=0.84,
+        ring_tip_y=0.85,
+        pinky_tip_y=0.86,
+    )
+    assert classify_from_landmarks(pts) == "fist"
