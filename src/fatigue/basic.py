@@ -1,21 +1,28 @@
 from __future__ import annotations
 
+import time
+
 import cv2
-import numpy as np
 import mediapipe as mp
+import numpy as np
 
 LEFT_EYE_INDICES = [33, 160, 158, 133]
 RIGHT_EYE_INDICES = [362, 385, 387, 263]
+
 MOUTH_TOP = 13
 MOUTH_BOTTOM = 14
 MOUTH_LEFT = 78
 MOUTH_RIGHT = 308
+
 NOSE_TIP = 1
 
 EYE_ASPECT_RATIO_THRESHOLD = 0.20
 CONSECUTIVE_CLOSED_FRAMES = 6
+
 YAWN_RATIO_THRESHOLD = 0.65
 YAWN_FRAMES_REQUIRED = 3
+YAWN_ALERT_WINDOW_SECONDS = 10.0
+
 HEAD_DROP_THRESHOLD = 0.035
 HEAD_DROP_FRAMES = 12
 
@@ -54,9 +61,11 @@ def _to_array(landmarks) -> np.ndarray:
 
 
 class DriverFatigueMonitor:
-    def __init__(self,
-                 min_detection_confidence: float = 0.5,
-                 min_tracking_confidence: float = 0.5):
+    def __init__(
+        self,
+        min_detection_confidence: float = 0.5,
+        min_tracking_confidence: float = 0.5,
+    ):
         self._face_mesh = mp.solutions.face_mesh.FaceMesh(
             static_image_mode=False,
             max_num_faces=1,
@@ -64,9 +73,11 @@ class DriverFatigueMonitor:
             min_detection_confidence=min_detection_confidence,
             min_tracking_confidence=min_tracking_confidence,
         )
+
         self.eye_closed_frames = 0
         self.yawn_frames = 0
         self.yawn_count = 0
+        self.last_yawn_time: float | None = None
         self.head_drop_frames = 0
         self.face_visible = False
         self.last_metrics: dict[str, float] = {}
@@ -80,6 +91,7 @@ class DriverFatigueMonitor:
             return False
 
         self.face_visible = True
+
         landmarks = _to_array(result.multi_face_landmarks[0].landmark)
 
         left_ratio = _eye_aspect_ratio(landmarks, LEFT_EYE_INDICES)
@@ -88,6 +100,7 @@ class DriverFatigueMonitor:
         head_drop = _head_drop_ratio(landmarks)
 
         avg_eye_ratio = float((left_ratio + right_ratio) * 0.5)
+
         self.last_metrics = {
             "eye_ratio": avg_eye_ratio,
             "mouth_ratio": mouth_ratio,
@@ -104,6 +117,7 @@ class DriverFatigueMonitor:
         else:
             if self.yawn_frames >= YAWN_FRAMES_REQUIRED:
                 self.yawn_count += 1
+                self.last_yawn_time = time.monotonic()
             self.yawn_frames = 0
 
         if head_drop > HEAD_DROP_THRESHOLD:
@@ -111,16 +125,23 @@ class DriverFatigueMonitor:
         else:
             self.head_drop_frames = 0
 
+        recent_yawn = (
+            self.last_yawn_time is not None
+            and (time.monotonic() - self.last_yawn_time) < YAWN_ALERT_WINDOW_SECONDS
+        )
+
         drowsy = (
             self.eye_closed_frames >= CONSECUTIVE_CLOSED_FRAMES
-            or self.yawn_count > 0
+            or recent_yawn
             or self.head_drop_frames >= HEAD_DROP_FRAMES
         )
+
         return drowsy
 
     def summary(self) -> str:
         if not self.face_visible:
             return "face lost"
+
         return (
             f"eyes={self.last_metrics.get('eye_ratio', 0):.2f} "
             f"mouth={self.last_metrics.get('mouth_ratio', 0):.2f} "
