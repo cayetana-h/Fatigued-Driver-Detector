@@ -1,155 +1,126 @@
 from __future__ import annotations
 
-import time
-
 import cv2
-import mediapipe as mp
 import numpy as np
 
-LEFT_EYE_INDICES = [33, 160, 158, 133]
-RIGHT_EYE_INDICES = [362, 385, 387, 263]
-
-MOUTH_TOP = 13
-MOUTH_BOTTOM = 14
-MOUTH_LEFT = 78
-MOUTH_RIGHT = 308
-
-NOSE_TIP = 1
-
-EYE_ASPECT_RATIO_THRESHOLD = 0.20
-CONSECUTIVE_CLOSED_FRAMES = 6
-
-YAWN_RATIO_THRESHOLD = 0.65
-YAWN_FRAMES_REQUIRED = 3
-YAWN_ALERT_WINDOW_SECONDS = 10.0
-
-HEAD_DROP_THRESHOLD = 0.035
-HEAD_DROP_FRAMES = 12
-
-
-def _distance(a: np.ndarray, b: np.ndarray) -> float:
-    return float(np.linalg.norm(a - b))
-
-
-def _eye_aspect_ratio(landmarks: np.ndarray, indices: list[int]) -> float:
-    left, top, bottom, right = [landmarks[i] for i in indices]
-    vertical = _distance(top, bottom)
-    horizontal = max(_distance(left, right), 1e-6)
-    return vertical / horizontal
-
-
-def _mouth_open_ratio(landmarks: np.ndarray) -> float:
-    top = landmarks[MOUTH_TOP]
-    bottom = landmarks[MOUTH_BOTTOM]
-    left = landmarks[MOUTH_LEFT]
-    right = landmarks[MOUTH_RIGHT]
-    vertical = _distance(top, bottom)
-    horizontal = max(_distance(left, right), 1e-6)
-    return vertical / horizontal
-
-
-def _head_drop_ratio(landmarks: np.ndarray) -> float:
-    nose = landmarks[NOSE_TIP]
-    left_eye = landmarks[LEFT_EYE_INDICES[0]]
-    right_eye = landmarks[RIGHT_EYE_INDICES[0]]
-    eye_center = (left_eye + right_eye) / 2.0
-    return float(nose[1] - eye_center[1])
-
-
-def _to_array(landmarks) -> np.ndarray:
-    return np.array([[lm.x, lm.y, lm.z] for lm in landmarks], dtype=np.float32)
+# Eye-closure proxy: no eyes detected for several consecutive frames.
+EYE_CLOSED_FRAMES_THRESHOLD = 10
+# Head-drop proxy: face center drifts below calibrated baseline.
+HEAD_DROP_PIXELS_THRESHOLD = 25
+HEAD_DROP_FRAMES_THRESHOLD = 10
+# Optional mouth-open proxy via smile cascade in lower face area.
+MOUTH_OPEN_FRAMES_THRESHOLD = 8
+# Stabilization: require persistence before switching overall status.
+DROWSY_PERSISTENCE_FRAMES = 3
+ALERT_PERSISTENCE_FRAMES = 6
 
 
 class DriverFatigueMonitor:
-    def __init__(
-        self,
-        min_detection_confidence: float = 0.5,
-        min_tracking_confidence: float = 0.5,
-    ):
-        self._face_mesh = mp.solutions.face_mesh.FaceMesh(
-            static_image_mode=False,
-            max_num_faces=1,
-            refine_landmarks=True,
-            min_detection_confidence=min_detection_confidence,
-            min_tracking_confidence=min_tracking_confidence,
+    def __init__(self,
+                 min_detection_confidence: float = 0.5,
+                 min_tracking_confidence: float = 0.5):
+        _ = (min_detection_confidence, min_tracking_confidence)
+        self._face = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        )
+        self._eyes = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_eye_tree_eyeglasses.xml"
+        )
+        self._smile = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_smile.xml"
         )
 
         self.eye_closed_frames = 0
-        self.yawn_frames = 0
-        self.yawn_count = 0
-        self.last_yawn_time: float | None = None
+        self.mouth_open_frames = 0
         self.head_drop_frames = 0
         self.face_visible = False
+        self._baseline_face_y: float | None = None
+        self._is_drowsy = False
+        self._drowsy_votes = 0
+        self._alert_votes = 0
         self.last_metrics: dict[str, float] = {}
 
     def update(self, frame: np.ndarray) -> bool:
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        result = self._face_mesh.process(rgb)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.equalizeHist(gray)
+        faces = self._face.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=5, minSize=(80, 80))
 
-        if not result.multi_face_landmarks:
+        if len(faces) == 0:
             self.face_visible = False
+            self._alert_votes += 1
+            self._drowsy_votes = 0
+            if self._alert_votes >= ALERT_PERSISTENCE_FRAMES:
+                self._is_drowsy = False
             return False
 
         self.face_visible = True
+        x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
+        face_roi = gray[y : y + h, x : x + w]
 
-        landmarks = _to_array(result.multi_face_landmarks[0].landmark)
+        if self._baseline_face_y is None:
+            self._baseline_face_y = float(y + h * 0.5)
 
-        left_ratio = _eye_aspect_ratio(landmarks, LEFT_EYE_INDICES)
-        right_ratio = _eye_aspect_ratio(landmarks, RIGHT_EYE_INDICES)
-        mouth_ratio = _mouth_open_ratio(landmarks)
-        head_drop = _head_drop_ratio(landmarks)
+        eyes_roi = face_roi[0 : int(h * 0.55), :]
+        eyes = self._eyes.detectMultiScale(eyes_roi, scaleFactor=1.1, minNeighbors=4, minSize=(18, 18))
+        eyes_visible = len(eyes) >= 1
 
-        avg_eye_ratio = float((left_ratio + right_ratio) * 0.5)
+        mouth_roi = face_roi[int(h * 0.55) : h, :]
+        mouth = self._smile.detectMultiScale(mouth_roi, scaleFactor=1.5, minNeighbors=20, minSize=(25, 20))
+        mouth_open = len(mouth) > 0
+
+        head_drop = float((y + h * 0.5) - self._baseline_face_y)
 
         self.last_metrics = {
-            "eye_ratio": avg_eye_ratio,
-            "mouth_ratio": mouth_ratio,
+            "eyes_visible": float(eyes_visible),
+            "mouth_open": float(mouth_open),
             "head_drop": head_drop,
         }
 
-        if avg_eye_ratio < EYE_ASPECT_RATIO_THRESHOLD:
+        if not eyes_visible:
             self.eye_closed_frames += 1
         else:
             self.eye_closed_frames = 0
 
-        if mouth_ratio > YAWN_RATIO_THRESHOLD:
-            self.yawn_frames += 1
+        if mouth_open:
+            self.mouth_open_frames += 1
         else:
-            if self.yawn_frames >= YAWN_FRAMES_REQUIRED:
-                self.yawn_count += 1
-                self.last_yawn_time = time.monotonic()
-            self.yawn_frames = 0
+            self.mouth_open_frames = 0
 
-        if head_drop > HEAD_DROP_THRESHOLD:
+        if head_drop > HEAD_DROP_PIXELS_THRESHOLD:
             self.head_drop_frames += 1
         else:
             self.head_drop_frames = 0
 
-        recent_yawn = (
-            self.last_yawn_time is not None
-            and (time.monotonic() - self.last_yawn_time) < YAWN_ALERT_WINDOW_SECONDS
+        raw_drowsy = (
+            self.eye_closed_frames >= EYE_CLOSED_FRAMES_THRESHOLD
+            or self.mouth_open_frames >= MOUTH_OPEN_FRAMES_THRESHOLD
+            or self.head_drop_frames >= HEAD_DROP_FRAMES_THRESHOLD
         )
 
-        drowsy = (
-            self.eye_closed_frames >= CONSECUTIVE_CLOSED_FRAMES
-            or recent_yawn
-            or self.head_drop_frames >= HEAD_DROP_FRAMES
-        )
+        if raw_drowsy:
+            self._drowsy_votes += 1
+            self._alert_votes = 0
+            if self._drowsy_votes >= DROWSY_PERSISTENCE_FRAMES:
+                self._is_drowsy = True
+        else:
+            self._alert_votes += 1
+            self._drowsy_votes = 0
+            if self._alert_votes >= ALERT_PERSISTENCE_FRAMES:
+                self._is_drowsy = False
 
-        return drowsy
+        return self._is_drowsy
 
     def summary(self) -> str:
         if not self.face_visible:
             return "face lost"
-
         return (
-            f"eyes={self.last_metrics.get('eye_ratio', 0):.2f} "
-            f"mouth={self.last_metrics.get('mouth_ratio', 0):.2f} "
-            f"head={self.last_metrics.get('head_drop', 0):.3f}"
+            f"eyes={int(self.last_metrics.get('eyes_visible', 0))} "
+            f"mouth={int(self.last_metrics.get('mouth_open', 0))} "
+            f"head_drop={self.last_metrics.get('head_drop', 0):.1f}px"
         )
 
     def close(self) -> None:
-        self._face_mesh.close()
+        return None
 
 
 def detect_fatigue(frame: np.ndarray) -> bool:
