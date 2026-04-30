@@ -4,3 +4,16 @@ __pycache__/
 venv/
 .venv/
 .env/
+
+# datasets
+data/raw/
+data/processed/
+
+# outputs
+outputs/
+
+# python cache
+__pycache__/
+*.pyc
+
+data/videos/
