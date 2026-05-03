@@ -182,7 +182,8 @@ class DLFatigueMonitor:
             return "face lost"
         return (
             f"L={self.last_left_prob:.2f} R={self.last_right_prob:.2f} "
-            f"PERCLOS={self.last_perclos:.1%}"
+            f"PERCLOS={self.last_perclos:.1%} "
+            f"closed_frames={self._sustained_closed}"
         )
 
     def close(self) -> None:
