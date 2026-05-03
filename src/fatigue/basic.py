@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import collections
+
 import cv2
 import mediapipe as mp
 import numpy as np
@@ -15,8 +17,13 @@ MOUTH_RIGHT = 308
 NOSE_TIP = 1
 
 EYE_ASPECT_RATIO_THRESHOLD = 0.08
-CONSECUTIVE_CLOSED_FRAMES = 18
+CONSECUTIVE_CLOSED_FRAMES = 24
 EYE_ALERT_HOLD_FRAMES = 60
+EYE_WINDOW_FRAMES = 24
+EYE_WINDOW_CLOSED_FRAMES = 20
+SEVERE_EYE_ASPECT_RATIO_THRESHOLD = 0.05
+SEVERE_EYE_WINDOW_FRAMES = 12
+SEVERE_EYE_WINDOW_CLOSED_FRAMES = 10
 
 YAWN_RATIO_THRESHOLD = 0.30
 YAWN_FRAMES_REQUIRED = 4
@@ -85,6 +92,12 @@ class DriverFatigueMonitor:
         )
 
         self.eye_closed_frames = 0
+        self.eye_closed_history: collections.deque[int] = collections.deque(
+            maxlen=EYE_WINDOW_FRAMES
+        )
+        self.severe_eye_closed_history: collections.deque[int] = collections.deque(
+            maxlen=SEVERE_EYE_WINDOW_FRAMES
+        )
         self.recent_eye_closure_frames = 0
         self.yawn_frames = 0
         self.yawn_count = 0
@@ -100,6 +113,9 @@ class DriverFatigueMonitor:
 
         if not result.multi_face_landmarks:
             self.face_visible = False
+            self.eye_closed_frames = 0
+            self.eye_closed_history.append(0)
+            self.severe_eye_closed_history.append(0)
             return False
 
         self.face_visible = True
@@ -121,10 +137,20 @@ class DriverFatigueMonitor:
             "yaw_ratio": yaw_ratio,
         }
 
-        if (
+        eye_measurement_reliable = yaw_ratio <= MAX_EYE_YAW_RATIO
+        eye_closed = (
             avg_eye_ratio < EYE_ASPECT_RATIO_THRESHOLD
-            and yaw_ratio <= MAX_EYE_YAW_RATIO
-        ):
+            and eye_measurement_reliable
+        )
+        severe_eye_closed = (
+            avg_eye_ratio < SEVERE_EYE_ASPECT_RATIO_THRESHOLD
+            and eye_measurement_reliable
+        )
+
+        self.eye_closed_history.append(int(eye_closed))
+        self.severe_eye_closed_history.append(int(severe_eye_closed))
+
+        if eye_closed:
             self.eye_closed_frames += 1
         else:
             if self.recent_eye_closure_frames > 0:
@@ -148,7 +174,19 @@ class DriverFatigueMonitor:
 
         active_yawn = self.yawn_frames >= YAWN_FRAMES_REQUIRED
         recent_yawn = self.recent_yawn_frames > 0
-        active_eye_closure = self.eye_closed_frames >= CONSECUTIVE_CLOSED_FRAMES
+        rolling_eye_closure = (
+            len(self.eye_closed_history) >= EYE_WINDOW_CLOSED_FRAMES
+            and sum(self.eye_closed_history) >= EYE_WINDOW_CLOSED_FRAMES
+        )
+        severe_rolling_eye_closure = (
+            len(self.severe_eye_closed_history) >= SEVERE_EYE_WINDOW_CLOSED_FRAMES
+            and sum(self.severe_eye_closed_history) >= SEVERE_EYE_WINDOW_CLOSED_FRAMES
+        )
+        active_eye_closure = (
+            self.eye_closed_frames >= CONSECUTIVE_CLOSED_FRAMES
+            or rolling_eye_closure
+            or severe_rolling_eye_closure
+        )
 
         if active_eye_closure:
             self.recent_eye_closure_frames = EYE_ALERT_HOLD_FRAMES
@@ -177,6 +215,8 @@ class DriverFatigueMonitor:
             f"head={self.last_metrics.get('head_drop', 0):.3f} "
             f"yaw={self.last_metrics.get('yaw_ratio', 0):.2f} "
             f"eye_frames={self.eye_closed_frames} "
+            f"eye_window={sum(self.eye_closed_history)}/{len(self.eye_closed_history)} "
+            f"severe_eye_window={sum(self.severe_eye_closed_history)}/{len(self.severe_eye_closed_history)} "
             f"recent_eye_frames={self.recent_eye_closure_frames} "
             f"yawn_frames={self.yawn_frames} "
             f"recent_yawn_frames={self.recent_yawn_frames} "
