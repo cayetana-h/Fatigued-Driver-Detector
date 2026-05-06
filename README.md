@@ -150,7 +150,7 @@ data/videos/
 Run:
 
 ```bash
-python -m src.main --video-path data/videos/INEW.mp4 --mode both
+python -m src.main --video-path data/videos/"VIDEO_NAME".mp4 --mode both
 ```
 
 ---
